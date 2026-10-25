@@ -1,0 +1,757 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Portal Index Reset - Documentation</title>
+    <link rel="stylesheet" href="Portal Index Reset.css">
+</head>
+<body>
+
+<header>
+    <h1>Portal Index Reset</h1>
+    <p>Giving Portal for ArcGIS 12.x an empty search index that boots, and diagnosing the one it has</p>
+    <span class="version">25 October 2026 &middot; Reset-PortalIndex.ps1 &middot; Reset-PortalIndex.cmd &middot; &copy; 2026 Ope Ltd &middot; not supported by Esri</span>
+</header>
+
+<div class="page-wrapper">
+
+    <!-- Sidebar -->
+    <aside class="sidebar" id="sidebar">
+        <button class="sidebar-toggle" id="sidebarToggle" title="Toggle sidebar">&#x276E;</button>
+        <div class="sidebar-inner">
+            <nav>
+                <span class="nav-group-label">Overview</span>
+                <ul>
+                    <li><a href="#keep-elastic-options">&#9888; Keep elastic.options</a></li>
+                    <li><a href="#overview">What it does</a></li>
+                    <li><a href="#anatomy">Anatomy of the index</a></li>
+                    <li><a href="#findings">What the logs showed</a></li>
+                </ul>
+
+                <span class="nav-group-label">The Tools</span>
+                <ul>
+                    <li><a href="#files">Files &amp; where they live</a></li>
+                    <li><a href="#cmd">Reset-PortalIndex.cmd</a></li>
+                    <li><a href="#ps1">Reset-PortalIndex.ps1</a></li>
+                </ul>
+
+                <span class="nav-group-label">Actions</span>
+                <ul>
+                    <li><a href="#act-diagnose">Diagnose</a></li>
+                    <li><a href="#act-golden">SaveGoldenConfig</a></li>
+                    <li><a href="#act-resetcluster">ResetCluster</a></li>
+                    <li><a href="#act-rebuildconfig">RebuildConfig</a></li>
+                    <li><a href="#act-rollback">Rollback</a></li>
+                </ul>
+
+                <span class="nav-group-label">Operations</span>
+                <ul>
+                    <li><a href="#runbook">Runbook</a></li>
+                    <li><a href="#backups">Backup folder</a></li>
+                    <li><a href="#after">After a reset</a></li>
+                    <li><a href="#troubleshooting">Troubleshooting</a></li>
+                    <li><a href="#unknowns">Verification status</a></li>
+                    <li><a href="#rehearsal">Rehearsing a failure</a></li>
+                    <li><a href="#prevention">Prevention</a></li>
+                </ul>
+
+                <span class="nav-group-label">Reference</span>
+                <ul>
+                    <li><a href="#ref-paths">Paths, ports, names</a></li>
+                    <li><a href="#ref-indices">OpenSearch indices</a></li>
+                    <li><a href="#ref-auth">How the script authenticates</a></li>
+                    <li><a href="#ref-exit">Exit codes</a></li>
+                    <li><a href="#ref-sources">Sources</a></li>
+                    <li><a href="#disclaimer">Disclaimer &amp; copyright</a></li>
+                </ul>
+            </nav>
+        </div>
+    </aside>
+
+    <!-- Main content -->
+    <main class="main-content">
+        <div class="container">
+
+            <!-- ─── Overview ─────────────────────────────────────────────── -->
+
+            <div class="critical" id="keep-elastic-options">
+                <h2>&#9888; KEEP <code>elastic.options</code> AT ALL COSTS</h2>
+                <p>
+                    <strong>The single file nothing can rebuild is <code>C:\arcgisportal\index\elastic.options</code>.</strong>
+                    It is Portal's encrypted bundle of index connection details. It is written once when the index
+                    service is created and never again.
+                </p>
+                <p>
+                    Verified on 24 October 2026: Portal does <strong>not</strong> recreate it when it is missing; Portal
+                    Admin's Reconfigure does not; this toolkit cannot; a copy from any other Portal is useless because it
+                    is encrypted with this deployment's key; and a byte-level scan of the entire machine, including
+                    Portal's Postgres database and WAL, found <strong>no second copy anywhere</strong>.
+                </p>
+                <p>
+                    Everything else in the index directory can be regenerated: the cluster data by a Full Reindex, the
+                    certificates and every yml by <a href="#act-rebuildconfig">RebuildConfig</a>. Lose this one file with no
+                    golden copy and the only ways back are a webgisdr restore or Esri Support.
+                </p>
+                <p>
+                    <strong>Protect it:</strong> run <a href="#act-golden">SaveGoldenConfig</a> today, schedule
+                    <code>Reset-PortalIndex.cmd SaveGoldenConfig</code> daily, and keep the golden folder off the machine.
+                    The same copy also preserves <code>internal_users.yml</code>, needed whenever the cluster is emptied.
+                </p>
+            </div>
+
+            <div class="intro" id="overview">
+                <h2>What it does</h2>
+                <p>
+                    Portal for ArcGIS 12.x keeps its search index in an embedded <strong>OpenSearch 2.18</strong>
+                    cluster under <code>C:\arcgisportal\index</code>. After a hard reboot or a storage-level DR
+                    restore that cluster sometimes refuses to start, and because the Esri-supported rebuild
+                    (Reindex / Reconfigure in the Portal Admin API) needs a running index, there is no way back
+                    from inside Portal. The toolkit documented here fixes that gap: it <strong>moves the damaged
+                    cluster aside and leaves an empty index that boots</strong>, after which a Full Reindex from
+                    the Portal Admin UI repopulates it from the Portal database.
+                </p>
+                <p>
+                    Two files do the work: a PowerShell script holding the logic and a batch file that is the
+                    double-click front door for operators. Nothing is ever deleted; every reset moves data into a
+                    timestamped backup folder and can be rolled back.
+                </p>
+                <div class="note">
+                    The old 10.x and 11.x approach of unpacking <code>empty_index.zip</code> over the index folder
+                    does not exist in 12.x. The config that a bootable index needs is generated per deployment
+                    (machine name, cluster name, certificates, Portal's stored index password), so the "template"
+                    has to be captured from <em>this</em> deployment while it is healthy. That is what
+                    <a href="#act-golden">SaveGoldenConfig</a> is for.
+                </div>
+            </div>
+
+            <div class="intro" id="anatomy">
+                <h2>Anatomy of the index (12.1)</h2>
+                <p>Everything below was read from a reference copy of a stopped Portal 12.1 (build 20379) machine.</p>
+                <div class="source-table">
+                    <table>
+                        <thead><tr><th>Piece</th><th>Where</th><th>Derived?</th></tr></thead>
+                        <tbody>
+                            <tr><td>OpenSearch binaries and plugins</td><td><code>C:\ArcGIS\Portal\framework\runtime\ds\framework\runtime\opensearch</code>, hosted by a cut-down ArcGIS Data Store runtime. Ships <code>bin\opensearch-node.bat</code>, <code>bin\opensearch-shard.bat</code>, <code>plugins\opensearch-security\tools\securityadmin.bat</code> and <code>..\ds\bin\openssl.exe</code>.</td><td>install</td></tr>
+                            <tr><td><code>config\opensearch.yml</code>, <code>jvm.options</code>, <code>opensearch.keystore</code></td><td><code>C:\arcgisportal\index\config</code>. Cluster <code>bds_xxxxxxxx</code>, node name = machine name, HTTP 7220, transport 7120, binds to <code>_site_, &lt;machine&gt;, _local_</code>.</td><td>no, keep</td></tr>
+                            <tr><td><code>config\certs\</code></td><td>Self-signed PEM pair set generated by Portal with the bundled openssl: <code>root-ca</code>, <code>node</code> (CN=*.LOCAL), <code>admin</code> (CN = cluster name, upper case). Valid ten years.</td><td>no, keep</td></tr>
+                            <tr><td><code>config\opensearch-security\*.yml</code></td><td>Security plugin bootstrap files. <code>internal_users.yml</code> holds the bcrypt hash of the index admin password Portal uses.</td><td>no, keep</td></tr>
+                            <tr><td><code>elastic.options</code></td><td>Portal's encrypted bundle of index connection details, an Esri file OpenSearch never reads. Must stay paired with <code>internal_users.yml</code>. Portal does <em>not</em> recreate it when missing (verified) and no other copy exists anywhere on the machine (verified by a full scan), so it is the one file only a golden copy or webgisdr can bring back.</td><td><strong>no, keep</strong></td></tr>
+                            <tr><td><code>nodes\0\_state</code></td><td>Cluster metadata (Lucene-based in 2.x). Corruption here stops the node from starting at all.</td><td><strong>yes</strong></td></tr>
+                            <tr><td><code>nodes\0\indices\&lt;uuid&gt;</code></td><td>One folder per index: segments, translog, shard state. See <a href="#ref-indices">OpenSearch indices</a>.</td><td><strong>yes</strong></td></tr>
+                            <tr><td><code>dsdata\etc\spatiotemporal-config.json</code></td><td><code>C:\arcgisportal\dsdata\etc</code>. The Data Store runtime's record of the cluster: name, <code>cluster.uuid</code>, data path, last known status.</td><td>maintained by runtime</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <p>
+                    The point of the table: <strong>everything under <code>nodes\</code> is derived</strong>. The three
+                    Portal indices are rebuilt by a Full Reindex (the cluster state's index graveyard shows a Full
+                    Reindex already deleted and re-created them once). The security index is re-created from the yml
+                    files on first boot because <code>plugins.security.allow_default_init_securityindex</code> is
+                    true. The Data Store bookkeeping indices were created by the runtime when the cluster was first
+                    built; they were <em>not</em> recreated after the 24 Oct 2026 ResetCluster, and Portal runs
+                    without them (five indices instead of eight). An empty <code>nodes\</code> plus the existing
+                    <code>config\</code> is therefore an empty index that boots.
+                </p>
+            </div>
+
+            <div class="intro" id="findings">
+                <h2>What the logs showed</h2>
+                <ul class="param-list">
+                    <li><span class="param-name">startup noise</span> &mdash; every healthy start logs <code>Not yet initialized (you may need to run securityadmin)</code> three times in the OpenSearch log and <code>SEVERE Error in generating Portal Indices in Portal Index Builder Plugin</code> in the Portal log, then <code>Started Index Service</code> three minutes later. It is a race between Portal and the security plugin, not corruption. Do not treat either message as the fault.</li>
+                    <li><span class="param-name">2 Jun 2026</span> &mdash; the whole index service was regenerated: new cluster name, new certificates (visible in <code>openssl.log</code>), dsdata re-initialised. Postgres restarted eight times and the config store reports 12.1.0, so this was almost certainly the 12.1 upgrade. Portal has a code path that builds the index service from nothing, but it runs only during upgrade: on 24 Oct 2026 Portal was started with the index directory absent and created nothing, and Portal Admin's Reconfigure in that state created nothing either.</li>
+                    <li><span class="param-name">19 Sep 2026</span> &mdash; seven Portal restarts in one evening. OpenSearch came up every time; Portal's Tomcat was what timed out. No OpenSearch corruption is visible.</li>
+                    <li><span class="param-name">absent</span> &mdash; no <code>node.lock</code>, <code>CorruptIndexException</code>, <code>TranslogCorrupted</code>, bind or certificate errors anywhere in the retained logs. The failing state has not been captured yet. <strong>Next time it happens, run Diagnose before touching anything.</strong></li>
+                    <li><span class="param-name">no backups</span> &mdash; the Portal log warns daily that the deployment has never been backed up with webgisdr.</li>
+                </ul>
+            </div>
+
+            <!-- ─── The Tools ────────────────────────────────────────────── -->
+
+            <div class="method" id="files">
+                <div class="method-header">
+                    <h2>Files &amp; where they live</h2>
+                    <div class="method-signature">keep both together; the batch file finds the script next to itself</div>
+                </div>
+                <div class="method-body">
+                    <div class="source-table">
+                        <table>
+                            <thead><tr><th>File</th><th>Role</th><th>Who runs it</th></tr></thead>
+                            <tbody>
+                                <tr><td><code>Reset-PortalIndex.ps1</code></td><td>All the logic. Five actions, backup/rollback, admin-certificate access to OpenSearch.</td><td>called by the batch file, or directly from an elevated console</td></tr>
+                                <tr><td><code>Reset-PortalIndex.cmd</code></td><td>Double-click front door. Self-elevates through UAC, shows a menu, keeps the window open. Also accepts an action on the command line.</td><td>operators</td></tr>
+                                <tr><td><code>PLAN.md</code></td><td>The investigation write-up and reset ladder in Markdown.</td><td>reference</td></tr>
+                                <tr><td><code>docs\</code></td><td>This page and its stylesheet.</td><td>reference</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p>
+                        Copy both scripts to the Portal machine, for example <code>C:\Admin\PortalIndex\</code>.
+                        They find the Portal install through the <code>AGSPORTAL</code> environment variable the
+                        installer sets (falling back to <code>C:\ArcGIS\Portal</code>), use it for openssl and the
+                        OpenSearch binaries, and read the index path from <code>dir.index</code> in
+                        <code>portal-config.properties</code>: the live copy in <code>framework\etc</code> first, then
+                        the installer's <code>etc</code> copy, then Portal's backup in the content store under
+                        <code>dir.data\content\items\portal</code>. Diagnose prints where each path came from.
+                    </p>
+                </div>
+            </div>
+
+            <div class="method" id="cmd">
+                <div class="method-header">
+                    <h2>Reset-PortalIndex.cmd <span class="badge badge-list">recommended front door</span></h2>
+                    <div class="method-signature">Reset-PortalIndex.cmd [Diagnose | SaveGoldenConfig | ResetCluster | ResetClusterGolden | RebuildConfig | RebuildConfigReset | Rollback &lt;backup&gt;]</div>
+                </div>
+                <div class="method-body">
+                    <p>
+                        Double-click it. Windows asks for elevation, then a menu appears:
+                    </p>
+<pre>  1  Diagnose            read-only health report (always start here)
+  2  SaveGoldenConfig    snapshot config + certs while HEALTHY (do this now)
+  3  ResetCluster        empty the cluster, keep config/certs
+  4  ResetCluster        ...and restore config/certs from the golden copy
+  5  RebuildConfig       regenerate certs + config in place (no golden copy needed), keep cluster data
+  6  RebuildConfig       ...and empty the cluster as well (config AND data damaged)
+  7  Rollback            put a backup back
+  Q  Quit</pre>
+                    <p>
+                        After the chosen action finishes the window pauses so the result can be read, then returns to
+                        the menu. Option 7 lists the available backup folders before asking which one to restore.
+                    </p>
+                    <ul class="param-list">
+                        <li><span class="param-name">unattended</span> &mdash; pass the action as the first argument and the batch file runs it without the menu and exits with the script's exit code: <code>Reset-PortalIndex.cmd Diagnose</code>, <code>Reset-PortalIndex.cmd Rollback 20261025-101500_ResetCluster</code>.</li>
+                        <li><span class="param-name">overrides</span> &mdash; set <code>PORTAL_INSTALLDIR</code>, <code>PORTAL_INDEXDIR</code> or <code>PORTAL_BACKUPROOT</code> in the environment (or edit the top of the file) for a non-default install.</li>
+                        <li><span class="param-name">execution policy</span> &mdash; the script is launched with <code>-ExecutionPolicy Bypass</code> for that one process; machine policy is untouched.</li>
+                        <li><span class="param-name">output</span> &mdash; the console buffer is finite. For Diagnose rely on the report folder it writes rather than scrolling back.</li>
+                    </ul>
+                    <div class="note">
+                        Self-elevation relaunches the file through UAC. A user who cannot answer a UAC prompt should
+                        right-click the file and choose <em>Run as administrator</em> instead.
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="ps1">
+                <div class="method-header">
+                    <h2>Reset-PortalIndex.ps1</h2>
+                    <div class="method-signature">.\Reset-PortalIndex.ps1 -Action &lt;action&gt; [-InstallDir] [-IndexDir] [-BackupRoot] [-GoldenDir] [-FromGolden] [-WithResetCluster] [-BackupName] [-WaitMinutes] [-Force]</div>
+                </div>
+                <div class="method-body">
+                    <p>Requires an elevated session (<code>#Requires -RunAsAdministrator</code>). Works on Windows PowerShell 5.1 and PowerShell 7.</p>
+                    <div class="source-table">
+                        <table>
+                            <thead><tr><th>Parameter</th><th>Default</th><th>Meaning</th></tr></thead>
+                            <tbody>
+                                <tr><td><code>-Action</code></td><td>required</td><td><code>Diagnose</code>, <code>SaveGoldenConfig</code>, <code>ResetCluster</code>, <code>RebuildConfig</code>, <code>Rollback</code></td></tr>
+                                <tr><td><code>-InstallDir</code></td><td><code>AGSPORTAL</code> environment variable, else <code>C:\ArcGIS\Portal</code></td><td>Portal install. Supplies openssl, the OpenSearch home and <code>portal-config.properties</code>.</td></tr>
+                                <tr><td><code>-IndexDir</code></td><td><code>dir.index</code> from portal-config.properties (framework\etc, then etc, then content store)</td><td>The index directory, normally <code>C:\arcgisportal\index</code>.</td></tr>
+                                <tr><td><code>-BackupRoot</code></td><td><code>&lt;parent of IndexDir&gt;\index_backups</code></td><td>Where moved-aside data, reports, transcripts and the golden config go.</td></tr>
+                                <tr><td><code>-GoldenDir</code></td><td><code>&lt;BackupRoot&gt;\golden_config</code></td><td>Known-good config snapshot location.</td></tr>
+                                <tr><td><code>-FromGolden</code></td><td>off</td><td>ResetCluster only: also replace <code>config\</code> and <code>elastic.options</code> from the golden copy.</td></tr>
+                                <tr><td><code>-WithResetCluster</code></td><td>off</td><td>RebuildConfig only: also move <code>nodes\</code> aside so the rebuilt config starts an empty cluster.</td></tr>
+                                <tr><td><code>-BackupName</code></td><td>&mdash;</td><td>Rollback only: folder name inside BackupRoot.</td></tr>
+                                <tr><td><code>-WaitMinutes</code></td><td>20</td><td>How long to wait for OpenSearch to answer after Portal is started. Reset actions roll back automatically when this expires.</td></tr>
+                                <tr><td><code>-Force</code></td><td>off</td><td>Skip the YES confirmations. Not for the first run.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <p>
+                        Every action except Diagnose writes a transcript to
+                        <code>&lt;BackupRoot&gt;\&lt;timestamp&gt;_&lt;Action&gt;_transcript.txt</code>. Diagnose writes
+                        its own transcript inside its report folder.
+                    </p>
+                </div>
+            </div>
+
+            <!-- ─── Actions ──────────────────────────────────────────────── -->
+
+            <div class="method" id="act-diagnose">
+                <div class="method-header">
+                    <h2>Diagnose <span class="badge badge-list">read-only</span></h2>
+                    <div class="method-signature">always the first thing to run when the index misbehaves</div>
+                </div>
+                <div class="method-body">
+                    <p>Checks, in order, and prints a verdict line for each:</p>
+                    <ul class="param-list">
+                        <li><span class="param-name">paths</span> &mdash; resolved directories, cluster name, ports, bind names, whether a golden config exists.</li>
+                        <li><span class="param-name">service &amp; processes</span> &mdash; state of the <em>Portal for ArcGIS</em> service and any <code>java.exe</code> whose command line references the index directory or the OpenSearch home. A leftover one holds <code>node.lock</code> and blocks the next start.</li>
+                        <li><span class="param-name">layout</span> &mdash; presence of <code>config</code>, <code>certs</code>, <code>opensearch-security</code>, <code>elastic.options</code>, <code>nodes\0\_state</code>, <code>nodes\0\indices</code>; count of index folders; zero-byte data files (classic hard-reset damage).</li>
+                        <li><span class="param-name">disk</span> &mdash; free space on the index drive.</li>
+                        <li><span class="param-name">DNS</span> &mdash; every host name in <code>network.host</code> and <code>discovery.seed_hosts</code> must resolve, or OpenSearch cannot bind. This is the DR-to-a-renamed-host trap.</li>
+                        <li><span class="param-name">certificates</span> &mdash; each PEM is parsed with openssl (subject, expiry), each key is checked, and the <code>admin_dn</code> in opensearch.yml is shown next to the admin cert CN.</li>
+                        <li><span class="param-name">cluster</span> &mdash; <code>_cluster/health</code>, <code>_cat/indices</code>, <code>_cat/shards</code> with unassigned reasons, security plugin health, and <code>_cluster/allocation/explain</code> when the cluster is red. Cluster state metadata is saved to the report. <strong>Yellow is the permanent normal state</strong>: every index carries one replica but there is only one node, so the replicas can never be placed. Diagnose says so explicitly and only complains when a <em>primary</em> shard is not started.</li>
+                        <li><span class="param-name">logs</span> &mdash; last 20 lines of the OpenSearch log and <code>out.txt</code>, any JVM crash log, and the last index-related SEVERE/WARNING lines of the newest Portal log. All copied into the report.</li>
+                    </ul>
+                    <p>
+                        Report folder: <code>&lt;BackupRoot&gt;\diagnostics\&lt;timestamp&gt;</code>. Send that folder to
+                        Esri Support if it comes to that. Diagnose touches nothing in the index directory and can be
+                        run while Portal is up.
+                    </p>
+                    <div class="note">
+                        <code>openssl verify</code> reports <code>node.pem</code> as self-signed because the node
+                        certificate carries the same DN as the CA. That is how Portal generates it and it is not a
+                        fault; Diagnose says so in its output.
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="act-golden">
+                <div class="method-header">
+                    <h2>SaveGoldenConfig <span class="badge badge-list">read-only on the index</span></h2>
+                    <div class="method-signature">run it today, while the index is healthy; repeat after any RebuildConfig or upgrade</div>
+                </div>
+                <div class="method-body">
+                    <p>
+                        Copies <code>config\</code> (yml, keystore, certs, security files), <code>elastic.options</code>
+                        and the <code>dsdata\etc\*.json</code> files to <code>&lt;BackupRoot&gt;\golden_config</code>, with
+                        a README noting when and from which cluster state they were taken. If a golden copy already
+                        exists it is renamed with a timestamp rather than overwritten. The action warns and asks for
+                        confirmation if OpenSearch is not answering or is red at the time.
+                    </p>
+                    <p>
+                        This is the 12.x replacement for <code>empty_index.zip</code>. It is specific to this
+                        deployment: the config names this machine and cluster, the admin certificate CN is the cluster
+                        name, and <code>internal_users.yml</code> must match the password inside
+                        <code>elastic.options</code>. It cannot be copied between Portals.
+                    </p>
+                    <div class="note">
+                        The golden folder contains private keys and the encrypted index credentials. Protect it like
+                        a certificate store, and keep a copy off the machine so a DR event does not take it too.
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="act-resetcluster">
+                <div class="method-header">
+                    <h2>ResetCluster <span class="badge badge-map">offline</span></h2>
+                    <div class="method-signature">the normal reset: empty cluster, same config, same certificates</div>
+                </div>
+                <div class="method-body">
+                    <ul class="param-list">
+                        <li><span class="param-name">1</span> &mdash; copy <code>dsdata\etc\*.json</code> into the backup folder for reference.</li>
+                        <li><span class="param-name">2</span> &mdash; stop the <em>Portal for ArcGIS</em> service (up to 10 minutes), then find and, after confirmation, kill any leftover OpenSearch <code>java.exe</code>.</li>
+                        <li><span class="param-name">3</span> &mdash; move <code>nodes\</code> to <code>&lt;BackupRoot&gt;\&lt;timestamp&gt;_ResetCluster\nodes</code>. A move on the same volume is instant regardless of size.</li>
+                        <li><span class="param-name">3b</span> &mdash; with <code>-FromGolden</code>: also move <code>config\</code> and <code>elastic.options</code> into the backup and copy the golden versions into place.</li>
+                        <li><span class="param-name">4</span> &mdash; start Portal and poll <code>_cluster/health</code> through the admin certificate every 20 seconds for up to <code>-WaitMinutes</code>. Measured: 4 min 33 s.</li>
+                        <li><span class="param-name">5</span> &mdash; wait for the security plugin to report UP (it initialises from the yml files a few seconds after the port opens), then print the index list. Expect only <code>.opendistro_security</code> and <code>.plugins-ml-config</code>: Portal does not create <code>ago-items</code>, <code>ago-users</code> and <code>ago-groups</code> at startup, the Full Reindex does.</li>
+                        <li><span class="param-name">on failure</span> &mdash; stop Portal again, keep the failed attempt as <code>nodes_failed_attempt</code>, move the original <code>nodes\</code> (and config, if replaced) back, start Portal, and exit with an error pointing at the OpenSearch log.</li>
+                    </ul>
+                    <p>Use plain <code>ResetCluster</code> when Diagnose shows healthy certs and yml but a cluster that will not start or will not go green. Add <code>-FromGolden</code> when Diagnose shows unreadable PEM files, a damaged <code>opensearch.yml</code> or a mangled <code>elastic.options</code> and a golden copy exists. Without one, use <a href="#act-rebuildconfig">RebuildConfig</a>.</p>
+                </div>
+            </div>
+
+            <div class="method" id="act-rebuildconfig">
+                <div class="method-header">
+                    <h2>RebuildConfig <span class="badge badge-map">offline</span> <span class="badge badge-meta">no golden copy needed</span></h2>
+                    <div class="method-signature">regenerate certificates and config in place; carry over the two credential files</div>
+                </div>
+                <div class="method-body">
+                    <p>
+                        For a damaged <code>config\</code> when no golden copy exists. Portal will not do this itself:
+                        on 24 Oct 2026 it was started with the index directory absent and created nothing, and
+                        Reconfigure in Portal Admin created nothing either. So the script rebuilds the folder from
+                        what the install ships and what Portal did at cluster creation.
+                    </p>
+                    <ul class="param-list">
+                        <li><span class="param-name">precheck</span> &mdash; <code>elastic.options</code> must contain Portal's encrypted credential. <code>opensearch-security\internal_users.yml</code> must contain a bcrypt hash <em>only</em> when the cluster will be emptied (<code>-WithResetCluster</code>) or no security index is found under <code>nodes\</code>; otherwise the live security index already holds the hash and the file is written from the empty template with a warning. Neither file can be regenerated and Portal offers no API to set a new index password, so the action refuses when a needed one is damaged.</li>
+                        <li><span class="param-name">identity</span> &mdash; cluster name, node name and ports are read from the old <code>opensearch.yml</code> if it is still readable, otherwise from <code>dsdata\etc\spatiotemporal-config.json</code>, which lives outside the index directory.</li>
+                        <li><span class="param-name">1</span> &mdash; stop Portal and any leftover OpenSearch <code>java.exe</code>; move <code>config\</code> to the backup folder (and <code>nodes\</code> too with <code>-WithResetCluster</code>).</li>
+                        <li><span class="param-name">2</span> &mdash; generate <code>certs\</code> with the bundled openssl using Portal's own recipe: RSA 2048, PKCS#8 keys, ten-year validity, CA and node certificate CN <code>*.LOCAL</code> with a critical CA:TRUE constraint on the CA, admin certificate CN equal to the cluster name in upper case. The output matches Portal's originals byte-for-byte in size. The CA key is kept only in the backup folder.</li>
+                        <li><span class="param-name">3</span> &mdash; write <code>opensearch.yml</code> from the layout Portal 12.1 generated, with the identity substituted; copy <code>jvm.options</code>, <code>log4j2.properties</code> and <code>opensearch.keystore</code> from the old config when intact, otherwise from Esri's templates; copy the security yml files from the install (they are identical to Portal's); carry over <code>internal_users.yml</code> and leave <code>elastic.options</code> in place.</li>
+                        <li><span class="param-name">4</span> &mdash; start Portal and wait for OpenSearch, then for the security plugin and Portal's indices. Rollback of config (and nodes) if it does not come up.</li>
+                    </ul>
+                    <p>
+                        Afterwards run <a href="#act-golden">SaveGoldenConfig</a> because the certificates have changed,
+                        and a Full Reindex if the cluster was emptied or the Indexer Status counts differ.
+                    </p>
+                    <div class="note">
+                        The credential pair is the hard floor. Both files are tiny, written once at cluster creation
+                        and never touched again, so a crash mid-write cannot hit them; in every break so far they
+                        survived. If they are ever lost with no golden copy, the remaining options are webgisdr restore
+                        or Esri Support. Scheduling SaveGoldenConfig daily removes that risk.
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="act-rollback">
+                <div class="method-header">
+                    <h2>Rollback</h2>
+                    <div class="method-signature">-Action Rollback -BackupName &lt;folder&gt;</div>
+                </div>
+                <div class="method-body">
+                    <p>
+                        Without <code>-BackupName</code> it lists the backup folders and stops. With one, it stops
+                        Portal, moves whatever is currently in place into <code>&lt;backup&gt;\replaced_&lt;timestamp&gt;</code>,
+                        moves the backed-up <code>nodes</code> and/or <code>config</code> (plus <code>elastic.options</code>
+                        when it was saved) back, and starts Portal. Works for ResetCluster and RebuildConfig backups
+                        alike. Nothing is discarded in either direction.
+                    </p>
+                </div>
+            </div>
+
+            <!-- ─── Operations ───────────────────────────────────────────── -->
+
+            <div class="method" id="runbook">
+                <div class="method-header">
+                    <h2>Runbook</h2>
+                    <div class="method-signature">least destructive first; each rung has an automatic way back</div>
+                </div>
+                <div class="method-body">
+                    <div class="output-label">Now, while everything works</div>
+                    <ul class="param-list">
+                        <li><span class="param-name">1</span> &mdash; copy both scripts to the Portal machine and to the DR/test machine.</li>
+                        <li><span class="param-name">2</span> &mdash; run <strong>Diagnose</strong> on each, read the report, keep it as the healthy baseline.</li>
+                        <li><span class="param-name">3</span> &mdash; run <strong>SaveGoldenConfig</strong> on each; copy the golden folder somewhere off the box.</li>
+                        <li><span class="param-name">4</span> &mdash; on the test machine, rehearse <strong>ResetCluster</strong> followed by a Full Reindex in the UI (see <a href="#rehearsal">Rehearsing a failure</a>). Done once on 24 Oct 2026; see <a href="#unknowns">Verification status</a>.</li>
+                    </ul>
+                    <div class="output-label">When the index will not come up</div>
+                    <ul class="param-list">
+                        <li><span class="param-name">1</span> &mdash; <strong>Diagnose</strong>. Read the OpenSearch log tail it prints. Fix anything environmental first: a leftover java process, a host name that no longer resolves, a full disk.</li>
+                        <li><span class="param-name">2</span> &mdash; <strong>ResetCluster</strong>, adding <code>-FromGolden</code> (menu option 4) if certs or config looked damaged. This is the expected path: when OpenSearch will not start, Portal Admin's <em>Reconfigure</em> cannot help, because it is driven through the very index service that is down.</li>
+                        <li><span class="param-name">3</span> &mdash; certs or config damaged and no golden copy: <strong>RebuildConfig</strong> (menu 5), or menu 6 if the cluster data is damaged as well.</li>
+                        <li><span class="param-name">4</span> &mdash; webgisdr restore, or Esri Support with the Diagnose report folder.</li>
+                    </ul>
+                    <div class="note">
+                        <em>Reconfigure</em> (Portal Admin &gt; System &gt; Indexer) is only an option for the other kind of
+                        fault: OpenSearch running and Portal's web tier up, but one Portal index wrong or missing. It
+                        needs both to be alive. See <a href="#ref-sources">Sources</a>.
+                    </div>
+                    <ul class="param-list">
+                    </ul>
+                    <p>After any successful reset: <a href="#after">Full Reindex from the UI</a>.</p>
+                </div>
+            </div>
+
+            <div class="method" id="backups">
+                <div class="method-header">
+                    <h2>Backup folder</h2>
+                    <div class="method-signature">C:\arcgisportal\index_backups\ by default</div>
+                </div>
+                <div class="method-body">
+<pre>index_backups\
+  golden_config\                        SaveGoldenConfig: config\, elastic.options, *.json, README.txt
+  diagnostics\&lt;timestamp&gt;\             Diagnose: transcript, cluster-state.json, log copies
+  &lt;timestamp&gt;_ResetCluster\            nodes\  [config\  elastic.options]  *.json
+  &lt;timestamp&gt;_RebuildConfig\           config\  [nodes\]  root-ca-key.pem  elastic.options.copy  *.json
+  &lt;timestamp&gt;_&lt;Action&gt;_transcript.txt  console transcript of every non-Diagnose run
+  ...\nodes_failed_attempt, index_failed_attempt, replaced_&lt;timestamp&gt;   kept after auto-rollback / Rollback</pre>
+                    <p>
+                        Backups live on the same volume as the index so that moves are instant. They are not
+                        pruned automatically; once a reset has been proven good and a Full Reindex has completed,
+                        the <code>&lt;timestamp&gt;_Reset*</code> folders can be deleted by hand.
+                    </p>
+                </div>
+            </div>
+
+            <div class="method" id="after">
+                <div class="method-header">
+                    <h2>After a reset</h2>
+                    <div class="method-signature">Portal Admin &gt; System &gt; Indexer &gt; Reindex, mode Full</div>
+                </div>
+                <div class="method-body">
+                    <ul class="param-list">
+                        <li><span class="param-name">wait</span> &mdash; let Portal finish starting. The Portal log shows <code>Started Index Service</code> and then <code>Started web server</code>; the usual <em>Error in generating Portal Indices</em> line in between is expected.</li>
+                        <li><span class="param-name">check</span> &mdash; Portal Admin &gt; System &gt; Indexer &gt; Status. Database counts will be populated, index counts zero: the three <code>ago-*</code> indices do not exist yet.</li>
+                        <li><span class="param-name">reindex</span> &mdash; Reindex with mode <em>Full</em>. This creates <code>ago-items</code>, <code>ago-users</code> and <code>ago-groups</code> and fills them. Search and content listings are unavailable until it finishes. Watch Status until every <code>databaseCount</code> equals its <code>indexCount</code> and <code>syncStatus</code> is <code>true</code>. Judge by these numbers, not by OpenSearch's <code>docs.count</code>, which counts documents rather than Portal items and runs higher.</li>
+                        <li><span class="param-name">golden</span> &mdash; after a RebuildConfig, run SaveGoldenConfig again.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="method" id="troubleshooting">
+                <div class="method-header">
+                    <h2>Troubleshooting</h2>
+                    <div class="method-signature">symptom &rarr; meaning &rarr; what to do</div>
+                </div>
+                <div class="method-body">
+                    <div class="source-table">
+                        <table>
+                            <thead><tr><th>Symptom</th><th>Meaning</th><th>Do</th></tr></thead>
+                            <tbody>
+                                <tr><td>Diagnose: "leftover java.exe process(es) still hold the index"</td><td>Unclean Portal stop; the orphan holds <code>nodes\0\node.lock</code> and the next start fails with "failed to obtain node locks".</td><td>Let a reset action kill it, or end the process by PID and start Portal normally. No reset needed.</td></tr>
+                                <tr><td>Diagnose: "&lt;name&gt; does NOT resolve"</td><td>OpenSearch binds to <code>_site_, &lt;machine&gt;, _local_</code>. A DR restore onto a host that cannot resolve the old name fails to bind.</td><td>Fix DNS or the hosts file. No reset needed.</td></tr>
+                                <tr><td>OpenSearch log: <code>CorruptStateException</code>, "failed to find metadata", node exits during gateway recovery</td><td>Cluster state under <code>nodes\0\_state</code> damaged.</td><td>ResetCluster.</td></tr>
+                                <tr><td>OpenSearch log: <code>CorruptIndexException</code> / <code>TranslogCorruptedException</code>; cluster red; <code>_cat/shards</code> shows an unassigned primary</td><td>One index damaged; the node is up.</td><td>If Portal's web tier is up: Reconfigure then Full Reindex in the Admin API. Otherwise ResetCluster.</td></tr>
+                                <tr><td><code>Not yet initialized</code> repeating for minutes, security health "not initialized"</td><td>Security index missing or unreadable, and auto-init did not happen (index exists but is broken).</td><td>ResetCluster rebuilds it from the yml files.</td></tr>
+                                <tr><td>Diagnose: a PEM "UNREADABLE", or admin_dn does not equal admin.pem CN</td><td>Certificates damaged or mixed up between clusters.</td><td>ResetCluster with the golden config (menu 4). Without a golden copy, RebuildConfig (menu 5).</td></tr>
+                                <tr><td>Diagnose: "OpenSearch not reachable ... or certificate auth refused" while the Portal UI works</td><td>Admin cert no longer matches <code>admin_dn</code>, or the HTTP port changed.</td><td>Compare the cert CN and <code>admin_dn</code> lines in the Diagnose output; check <code>http.port</code>.</td></tr>
+                                <tr><td>Reset succeeded but Portal still says the index service is unavailable</td><td>Portal could not create its indices or authenticate: <code>internal_users.yml</code> and <code>elastic.options</code> out of step, or the Data Store runtime rejected the new cluster UUID.</td><td>Check the Portal log for 401/auth text. Try Reconfigure in the Admin API. If the credential pair is intact, RebuildConfig; otherwise golden copy or webgisdr.</td></tr>
+                                <tr><td>Reset action rolled back automatically</td><td>OpenSearch did not answer within <code>-WaitMinutes</code>.</td><td>Read the OpenSearch log tail. A slow machine may need <code>-WaitMinutes 40</code>; a real boot error needs the next rung.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="unknowns">
+                <div class="method-header">
+                    <h2>Verification status</h2>
+                    <div class="method-signature">rehearsed on OPENZPTL12X, 24 October 2026</div>
+                </div>
+                <div class="method-body">
+                    <div class="source-table">
+                        <table>
+                            <thead><tr><th>Question</th><th>Status</th></tr></thead>
+                            <tbody>
+                                <tr><td>Does Diagnose reach OpenSearch with the admin certificate on a live machine?</td><td><strong>Verified.</strong> After fixing two Windows PowerShell 5.1 TLS issues (script-block callback, non-persisted client key).</td></tr>
+                                <tr><td>Does Diagnose survive a damaged certificate file?</td><td><strong>Verified.</strong> A truncated <code>node-key.pem</code> first aborted Diagnose (native stderr under <code>$ErrorActionPreference = 'Stop'</code>); openssl calls now go through a helper and the file is reported as UNREADABLE with its size.</td></tr>
+                                <tr><td>Does a truncated cluster-state file reproduce the "OpenSearch will not start" failure?</td><td><strong>Verified.</strong> <code>CorruptIndexException</code> at <code>NodeEnvironment.loadNodeMetadata</code>, nothing listening on 7220, Portal health check "Connection to the indexer service failed", Portal retrying the index service every two minutes.</td></tr>
+                                <tr><td>Does ResetCluster bring up an empty cluster on the existing config?</td><td><strong>Verified.</strong> Service stopped in 12 s; <code>nodes</code> moved in under 1 s; OpenSearch answered 4 min 33 s after service start, green, zero shards.</td></tr>
+                                <tr><td>Does the Data Store runtime / Portal accept the new cluster UUID without the dsdata json being touched?</td><td><strong>Verified.</strong> The Full Reindex created Portal's indices on the new cluster and ran normally.</td></tr>
+                                <tr><td>Does ResetCluster with the golden config repair a damaged <code>config\</code>?</td><td><strong>Verified.</strong> With a truncated <code>node-key.pem</code> in place, menu option 4 restored the golden copy; OpenSearch was green with the security plugin UP in strict mode 4 min 36 s after service start.</td></tr>
+                                <tr><td>Does a Full Reindex from the UI repopulate it completely?</td><td><strong>Verified.</strong> Indexer Status: 13,652 items, 498 groups, 51 users, database and index counts equal, <code>syncStatus: true</code>. (The OpenSearch document count in <code>ago-items</code> is higher than Portal's item count; compare Portal's Status numbers, not <code>docs.count</code>.)</td></tr>
+                                <tr><td>Does Portal regenerate the index service when the index directory is absent?</td><td><strong>No, verified.</strong> With the whole directory moved aside Portal logged "Started Index Service" after 15 s, then failed every health check with "Connection to the indexer service failed", and created no files in 20 minutes. Reconfigure in Portal Admin in that state created nothing either. The former ResetAll action was removed on this evidence.</td></tr>
+                                <tr><td>Does RebuildConfig produce a config OpenSearch and Portal accept?</td><td><strong>Verified live.</strong> Everything in <code>config\</code> except <code>internal_users.yml</code> was deleted (certs, <code>opensearch.yml</code>, <code>jvm.options</code>, <code>log4j2.properties</code>, keystore, other security yml). Menu option 5 took the cluster identity from <code>spatiotemporal-config.json</code>, regenerated the folder, and OpenSearch was up 4 min 38 s after service start: yellow, security plugin UP in strict mode, all five indices present with their data (29,124 / 498 / 51 documents). No reindex needed. Lab tests also cover rollback and refusal on a damaged <code>internal_users.yml</code>.</td></tr>
+                                <tr><td>Does Portal recreate <code>elastic.options</code> when it is missing?</td><td><strong>No, verified.</strong> With a healthy index, the file was moved away and Portal restarted; nothing was written. A full scan of 161,806 files including Portal's Postgres data and WAL found the token nowhere else. It is the one file nothing can rebuild; a golden copy or webgisdr backup is its only source.</td></tr>
+                                <tr><td>Does RebuildConfig with <code>-WithResetCluster</code> (menu 6) work when config and cluster data are both damaged?</td><td><strong>Verified live.</strong> Config gutted as above plus a truncated cluster-state file: config and <code>nodes</code> moved aside together, config regenerated, OpenSearch green with the security plugin UP 4 min 33 s after service start, only <code>.opendistro_security</code> present as expected, Full Reindex then required.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="rehearsal">
+                <div class="method-header">
+                    <h2>Rehearsing a failure</h2>
+                    <div class="method-signature">deterministic ways to break the index on the test machine</div>
+                </div>
+                <div class="method-body">
+                    <p>
+                        Pulling the power on the VM during a Full Reindex is the real cause, but it does not break the
+                        index every time. These two recipes imitate a torn write by truncating one file to half its
+                        length and fail the same way every time. Keep a pristine copy of <code>nodes</code> first so the
+                        test box can be put back without a reindex.
+                    </p>
+<pre>Stop-Service 'Portal for ArcGIS' -Force
+Copy-Item C:\arcgisportal\index\nodes C:\arcgisportal\nodes_pristine -Recurse</pre>
+                    <div class="output-label">Scenario 1: OpenSearch will not start (the DR case, used in the 24 Oct rehearsal)</div>
+<pre>$state = Get-ChildItem C:\arcgisportal\index\nodes\0\_state -Filter 'segments_*' | Select-Object -First 1
+$bytes = [IO.File]::ReadAllBytes($state.FullName)
+[IO.File]::WriteAllBytes($state.FullName, $bytes[0..([int]($bytes.Length / 2))])
+Start-Service 'Portal for ArcGIS'</pre>
+                    <p>Diagnose shows "not listening", the <code>CorruptIndexException</code> cause line, and Portal's failing health check. Recovery: ResetCluster, then Full Reindex.</p>
+                    <div class="output-label">Scenario 2: OpenSearch starts, one Portal index is red</div>
+<pre>$seg = Get-ChildItem C:\arcgisportal\index\nodes\0\indices\*\0\index -Filter 'segments_*' |
+       Where-Object { $_.FullName -like '*&lt;ago-items uuid from Diagnose&gt;*' } | Select-Object -First 1
+$bytes = [IO.File]::ReadAllBytes($seg.FullName)
+[IO.File]::WriteAllBytes($seg.FullName, $bytes[0..([int]($bytes.Length / 2))])
+Start-Service 'Portal for ArcGIS'</pre>
+                    <p>Diagnose shows the cluster red and a warning naming the unstarted primary. This is the case where Portal Admin's Reconfigure is worth trying first; ResetCluster if it does not recover.</p>
+                    <div class="output-label">Putting the test box back</div>
+<pre>Stop-Service 'Portal for ArcGIS' -Force
+Remove-Item C:\arcgisportal\index\nodes -Recurse -Force
+Move-Item C:\arcgisportal\nodes_pristine C:\arcgisportal\index\nodes
+Start-Service 'Portal for ArcGIS'</pre>
+                </div>
+            </div>
+
+            <div class="method" id="prevention">
+                <div class="method-header">
+                    <h2>Prevention</h2>
+                    <div class="method-signature">cheaper than any reset</div>
+                </div>
+                <div class="method-body">
+                    <ul class="param-list">
+                        <li><span class="param-name">graceful stop</span> &mdash; stop the <em>Portal for ArcGIS</em> service before VM snapshots used for DR, or make sure the hypervisor's shutdown gives Windows time to stop it. OpenSearch survives hard power loss far better than its translog and cluster state do.</li>
+                        <li><span class="param-name">names</span> &mdash; keep the machine name resolvable after a DR restore, or the index cannot bind.</li>
+                        <li><span class="param-name">webgisdr</span> &mdash; schedule it. The deployment has never been backed up.</li>
+                        <li><span class="param-name">golden config</span> &mdash; refresh it after every upgrade or RebuildConfig; store a copy off the box. Schedule <code>Reset-PortalIndex.cmd SaveGoldenConfig</code> daily: it is read-only and takes a second, and it is the only protection for the two credential files nothing can regenerate.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- ─── Reference ────────────────────────────────────────────── -->
+
+            <div class="method" id="ref-paths">
+                <div class="method-header">
+                    <h2>Paths, ports, names</h2>
+                    <div class="method-signature">as found on the reference machine</div>
+                </div>
+                <div class="method-body">
+                    <div class="source-table">
+                        <table>
+                            <thead><tr><th>Item</th><th>Value</th></tr></thead>
+                            <tbody>
+                                <tr><td>Portal install</td><td><code>C:\ArcGIS\Portal</code></td></tr>
+                                <tr><td>Index directory (<code>dir.index</code>)</td><td><code>C:\arcgisportal\index</code></td></tr>
+                                <tr><td>OpenSearch home</td><td><code>C:\ArcGIS\Portal\framework\runtime\ds\framework\runtime\opensearch</code> (2.18.0)</td></tr>
+                                <tr><td>openssl</td><td><code>C:\ArcGIS\Portal\framework\runtime\ds\bin\openssl.exe</code> (OpenSSL 3)</td></tr>
+                                <tr><td>OpenSearch log</td><td><code>C:\ArcGIS\Portal\framework\runtime\ds\usr\logs\&lt;MACHINE&gt;\opensearchlog\&lt;cluster&gt;.log</code> (WARN level and above only)</td></tr>
+                                <tr><td>Portal log</td><td><code>C:\arcgisportal\logs\&lt;MACHINE&gt;\portal\portal-*.log</code></td></tr>
+                                <tr><td>Cluster / node name</td><td><code>bds_cwzn1mgp</code> / <code>OPENZPTL12X</code></td></tr>
+                                <tr><td>Ports</td><td>HTTP 7220 (TLS), transport 7120</td></tr>
+                                <tr><td>Admin DN</td><td><code>CN=BDS_CWZN1MGP</code> (cluster name in upper case)</td></tr>
+                                <tr><td>Node certificate DN / allowed nodes DN</td><td><code>CN=*.LOCAL</code></td></tr>
+                                <tr><td>Windows service</td><td><code>Portal for ArcGIS</code></td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="ref-indices">
+                <div class="method-header">
+                    <h2>OpenSearch indices</h2>
+                    <div class="method-signature">decoded from nodes\0\indices\*\_state</div>
+                </div>
+                <div class="method-body">
+                    <div class="source-table">
+                        <table>
+                            <thead><tr><th>Index</th><th>Owner</th><th>Shards</th><th>Rebuilt by</th></tr></thead>
+                            <tbody>
+                                <tr><td><code>ago-items</code></td><td>Portal</td><td>1</td><td>Full Reindex (created and filled by it; Portal does not create it at startup)</td></tr>
+                                <tr><td><code>ago-users</code></td><td>Portal</td><td>1</td><td>Full Reindex</td></tr>
+                                <tr><td><code>ago-groups</code></td><td>Portal</td><td>1</td><td>Full Reindex</td></tr>
+                                <tr><td><code>.opendistro_security</code></td><td>security plugin</td><td>1</td><td>auto-init from <code>config\opensearch-security\*.yml</code> on first boot</td></tr>
+                                <tr><td><code>.dsconfig_os-2-3-0</code> (alias <code>.dsconfig</code>)</td><td>Data Store runtime</td><td>1</td><td>runtime, at original cluster creation only; not recreated by ResetCluster, Portal works without it</td></tr>
+                                <tr><td><code>esri-ds-metadata_os-2-3-0</code></td><td>Data Store runtime</td><td>5</td><td>as above</td></tr>
+                                <tr><td><code>esri-ds-oid_os-2-3-0</code></td><td>Data Store runtime</td><td>5</td><td>as above</td></tr>
+                                <tr><td><code>.plugins-ml-config</code></td><td>ml-commons plugin</td><td>1</td><td>plugin, at start</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="ref-auth">
+                <div class="method-header">
+                    <h2>How the script authenticates</h2>
+                    <div class="method-signature">admin certificate &rarr; PFX in memory &rarr; client-certificate TLS to https://localhost:7220</div>
+                </div>
+                <div class="method-body">
+                    <p>
+                        Portal's index password is encrypted in <code>elastic.options</code> and not recoverable. The
+                        script does not need it. The security plugin treats any client certificate whose DN is listed
+                        in <code>plugins.security.authcz.admin_dn</code> as a super-admin, and Portal generates exactly
+                        such a certificate in <code>config\certs\admin.pem</code> with its unencrypted key alongside.
+                        The script uses the bundled openssl to wrap the pair into a temporary PFX (3DES/SHA1 so every
+                        Windows build can import it), loads it as an <code>X509Certificate2</code> with a persisted
+                        machine key (Schannel cannot present a client certificate whose key is only in memory),
+                        deletes the file, and presents it on every REST call. The key container is removed again when
+                        the script exits. Server certificate validation is disabled for those calls through a
+                        compiled callback, because the node certificate is self-signed and a PowerShell script-block
+                        callback fails intermittently on Windows PowerShell 5.1. When the certificate call fails,
+                        Diagnose also probes the port without a certificate and reports whether TLS itself or the
+                        certificate authentication is at fault, and whether anything is listening on the port.
+                    </p>
+                    <p>
+                        The same certificate works with <code>securityadmin.bat</code> should a manual re-push of the
+                        security configuration ever be needed:
+                    </p>
+<pre>set OPENSEARCH_JAVA_HOME=C:\ArcGIS\Portal\framework\runtime\jre
+cd C:\ArcGIS\Portal\framework\runtime\ds\framework\runtime\opensearch\plugins\opensearch-security\tools
+securityadmin.bat -cd C:\arcgisportal\index\config\opensearch-security -icl -nhnv ^
+  -cacert C:\arcgisportal\index\config\certs\root-ca.pem ^
+  -cert   C:\arcgisportal\index\config\certs\admin.pem ^
+  -key    C:\arcgisportal\index\config\certs\admin-key.pem ^
+  -h localhost -p 7220</pre>
+                    <div class="note">
+                        In OpenSearch 2.x <code>securityadmin</code> talks to the REST port (7220 here), not the
+                        transport port. The JRE path above is Portal's usual one; the reference copy did not include
+                        it, so confirm it exists on the machine.
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="ref-exit">
+                <div class="method-header">
+                    <h2>Exit codes</h2>
+                    <div class="method-signature">Reset-PortalIndex.cmd and Reset-PortalIndex.ps1</div>
+                </div>
+                <div class="method-body">
+                    <div class="source-table">
+                        <table>
+                            <thead><tr><th>Code</th><th>From</th><th>Meaning</th></tr></thead>
+                            <tbody>
+                                <tr><td>0</td><td>both</td><td>Action completed. For a reset: OpenSearch answered on the new cluster.</td></tr>
+                                <tr><td>1</td><td>ps1 (passed through by cmd)</td><td>Action failed or was aborted; the last line of output and the transcript say why. Reset actions have already rolled back.</td></tr>
+                                <tr><td>1</td><td>cmd</td><td><code>Reset-PortalIndex.ps1</code> not found next to the batch file.</td></tr>
+                                <tr><td>2</td><td>cmd</td><td>Unknown action on the command line.</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <div class="method" id="ref-sources">
+                <div class="method-header">
+                    <h2>Sources</h2>
+                    <div class="method-signature">Esri and OpenSearch references behind the runbook</div>
+                </div>
+                <div class="method-body">
+                    <ul class="param-list">
+                        <li><span class="param-name">Reconfigure Index</span> &mdash; <a href="https://developers.arcgis.com/rest/enterprise-administration/portal/reconfigure-index/">developers.arcgis.com &hellip;/portal/reconfigure-index</a>. "Re-creates the index service metadata, schema, and data in the event that they become corrupted." Introduced at 10.9.1. Needs the Portal web tier.</li>
+                        <li><span class="param-name">Reindex</span> &mdash; <a href="https://developers.arcgis.com/rest/enterprise-administration/portal/reindex/">developers.arcgis.com &hellip;/portal/reindex</a>. Modes <code>USER_MODE</code>, <code>GROUP_MODE</code>, <code>SEARCH_MODE</code>, <code>FULL_MODE</code>; <code>async</code> from 11.5.</li>
+                        <li><span class="param-name">Manual rebuild (10.x)</span> &mdash; <a href="https://support.esri.com/en-us/knowledge-base/how-to-manually-rebuild-the-index-in-portal-for-arcgis-000020175">Esri KB 000020175</a>. The <code>empty_index.zip</code> procedure, marked no longer valid from 10.7.1.</li>
+                        <li><span class="param-name">Community</span> &mdash; <a href="https://community.esri.com/t5/arcgis-enterprise-portal-questions/how-to-rebuild-index-corrupt-index-for-arcgis/td-p/1294421">corrupt index, 10.8.1+</a>: no manual rebuild after 10.7.1, reindex repeatedly or restore.</li>
+                        <li><span class="param-name">securityadmin</span> &mdash; <a href="https://docs.opensearch.org/latest/security/configuration/security-admin/">docs.opensearch.org &hellip;/security-admin</a>.</li>
+                    </ul>
+                </div>
+            </div>
+
+            <div class="method" id="disclaimer">
+                <div class="method-header">
+                    <h2>Licence, disclaimer &amp; copyright</h2>
+                    <div class="method-signature">Apache License 2.0 &middot; not an Esri product &middot; use at your own discretion and risk</div>
+                </div>
+                <div class="method-body">
+                    <p><strong>Copyright &copy; 2026 Ope Ltd.</strong></p>
+                    <p>
+                        Licensed under the <a href="https://www.apache.org/licenses/LICENSE-2.0">Apache License, Version 2.0</a>.
+                        You may not use these files except in compliance with the License. Software distributed under the
+                        License is distributed on an "AS IS" basis, without warranties or conditions of any kind, either
+                        express or implied. See the <code>LICENSE</code> file in the repository for the full terms.
+                    </p>
+                    <p>
+                        This toolkit is <strong>not an Esri product and is not supported, endorsed or reviewed by
+                        Esri</strong>. It works directly on the files of Portal for ArcGIS and its embedded OpenSearch
+                        index, outside Esri's supported administration interfaces. Running it may put a deployment into
+                        a state Esri Support will not assist with.
+                    </p>
+                    <p>
+                        It is provided <strong>as is</strong>, without warranty of any kind, express or implied,
+                        including fitness for a particular purpose. Ope Ltd accepts no liability for data loss, downtime
+                        or any other consequence of its use. <strong>Use it at your own discretion and risk</strong>,
+                        rehearse on a non-production machine first, and keep current backups (webgisdr and a golden
+                        config) before touching a production Portal.
+                    </p>
+                    <p>
+                        Portal for ArcGIS, ArcGIS Enterprise and ArcGIS Data Store are trademarks of Esri. OpenSearch is
+                        a trademark of Amazon.com, Inc. or its affiliates.
+                    </p>
+                </div>
+            </div>
+
+        </div>
+    </main>
+</div>
+
+<footer>
+    Portal Index Reset &middot; &copy; 2026 Ope Ltd &middot; not supported by Esri, use at your own risk &middot; see PLAN.md for the investigation notes behind this page
+</footer>
+
+<script>
+    // Sidebar collapse
+    const sidebar = document.getElementById('sidebar');
+    document.getElementById('sidebarToggle').addEventListener('click', () => {
+        sidebar.classList.toggle('collapsed');
+    });
+
+    // Highlight the nav entry for the section in view
+    const links = Array.from(document.querySelectorAll('.sidebar nav a'));
+    const targets = links
+        .map(a => document.getElementById(a.getAttribute('href').slice(1)))
+        .filter(Boolean);
+    function highlight() {
+        let current = targets[0];
+        for (const t of targets) {
+            if (t.getBoundingClientRect().top <= 90) current = t;
+        }
+        links.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + current.id));
+    }
+    document.addEventListener('scroll', highlight, { passive: true });
+    highlight();
+</script>
+
+</body>
+</html>
