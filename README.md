@@ -42,7 +42,6 @@ The script talks to OpenSearch without Portal's stored password. Portal generate
 | `Reset-PortalIndex.ps1` | All the logic. Five actions, backup and rollback, admin-certificate access to OpenSearch. |
 | `Reset-PortalIndex.cmd` | Double-click launcher. Self-elevates through UAC, shows a menu, keeps the window open. Accepts an action on the command line for unattended use. |
 | `docs/Portal Index Reset.html` | Full documentation: anatomy, actions, runbook, troubleshooting, rehearsal recipes, verification. |
-| `PLAN.md` | Investigation notes and the reset ladder. |
 
 ## Requirements
 
@@ -123,6 +122,7 @@ The rehearsal recipes, including how to break the index deterministically and ho
 - [Reconfigure Index (Portal Admin API)](https://developers.arcgis.com/rest/enterprise-administration/portal/reconfigure-index/)
 - [Reindex (Portal Admin API)](https://developers.arcgis.com/rest/enterprise-administration/portal/reindex/)
 - [Esri KB 000020175: manual index rebuild, no longer valid after 10.7.1](https://support.esri.com/en-us/knowledge-base/how-to-manually-rebuild-the-index-in-portal-for-arcgis-000020175)
+- [Esri Community: "The portal is not ready. Connection to the indexer service failed"](https://community.esri.com/en/discussion/1720992/the-portal-is-not-ready-connection-to-the-indexer-service-failed) (11.4, OpenSearch "Not yet initialized", resolved by restoring from backup; the same health-check message this toolkit addresses)
 - [OpenSearch securityadmin](https://docs.opensearch.org/latest/security/configuration/security-admin/)
 
 ## Licence, disclaimer and copyright
