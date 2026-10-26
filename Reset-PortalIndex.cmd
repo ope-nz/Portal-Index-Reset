@@ -5,7 +5,8 @@ title Portal for ArcGIS - index reset
 rem ---------------------------------------------------------------------------
 rem  Reset-PortalIndex.cmd  -  double-click launcher for Reset-PortalIndex.ps1
 rem
-rem  Copyright (c) 2026 Ope Ltd. All rights reserved.
+rem  Copyright (c) 2026 Ope Ltd. Licensed under the Apache License, Version 2.0;
+rem  see http://www.apache.org/licenses/LICENSE-2.0. Distributed "AS IS" without warranties.
 rem  NOT an Esri product. NOT supported, endorsed or reviewed by Esri. Provided AS IS
 rem  without warranty; Ope Ltd accepts no liability. USE AT YOUR OWN DISCRETION AND RISK.
 rem

@@ -11,7 +11,7 @@
 <header>
     <h1>Portal Index Reset</h1>
     <p>Giving Portal for ArcGIS 12.x an empty search index that boots, and diagnosing the one it has</p>
-    <span class="version">25 October 2026 &middot; Reset-PortalIndex.ps1 &middot; Reset-PortalIndex.cmd &middot; &copy; 2026 Ope Ltd &middot; not supported by Esri</span>
+    <span class="version">25 October 2026 &middot; Reset-PortalIndex.ps1 &middot; Reset-PortalIndex.cmd &middot; &copy; 2026 Ope Ltd &middot; Apache 2.0 &middot; not supported by Esri</span>
 </header>
 
 <div class="page-wrapper">
@@ -63,7 +63,7 @@
                     <li><a href="#ref-auth">How the script authenticates</a></li>
                     <li><a href="#ref-exit">Exit codes</a></li>
                     <li><a href="#ref-sources">Sources</a></li>
-                    <li><a href="#disclaimer">Disclaimer &amp; copyright</a></li>
+                    <li><a href="#disclaimer">Licence &amp; disclaimer</a></li>
                 </ul>
             </nav>
         </div>
@@ -180,7 +180,6 @@
                             <tbody>
                                 <tr><td><code>Reset-PortalIndex.ps1</code></td><td>All the logic. Five actions, backup/rollback, admin-certificate access to OpenSearch.</td><td>called by the batch file, or directly from an elevated console</td></tr>
                                 <tr><td><code>Reset-PortalIndex.cmd</code></td><td>Double-click front door. Self-elevates through UAC, shows a menu, keeps the window open. Also accepts an action on the command line.</td><td>operators</td></tr>
-                                <tr><td><code>PLAN.md</code></td><td>The investigation write-up and reset ladder in Markdown.</td><td>reference</td></tr>
                                 <tr><td><code>docs\</code></td><td>This page and its stylesheet.</td><td>reference</td></tr>
                             </tbody>
                         </table>
@@ -727,7 +726,7 @@ securityadmin.bat -cd C:\arcgisportal\index\config\opensearch-security -icl -nhn
 </div>
 
 <footer>
-    Portal Index Reset &middot; &copy; 2026 Ope Ltd &middot; not supported by Esri, use at your own risk &middot; see PLAN.md for the investigation notes behind this page
+    Portal Index Reset &middot; &copy; 2026 Ope Ltd &middot; Apache License 2.0 &middot; not supported by Esri, use at your own risk
 </footer>
 
 <script>
